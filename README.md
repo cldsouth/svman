@@ -7,25 +7,11 @@ A lightweight CLI tool for creating, organizing, installing and managing scripts
 
 ## Installation
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cldsouth/svman/main/svman \
-  -o ~/.local/bin/svman
-chmod +x ~/.local/bin/svman
+curl -fsSL https://raw.githubusercontent.com/cldsouth/svman/main/install.sh | bash
 ```
 
-Then add `~/.local/bin` to your PATH:
-```bash
-# bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-
-# zsh
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
-
-# fish
-fish_add_path ~/.local/bin
-```
-
-> **Dependencies:** `bash`, `curl`, `git`. Optional: `gh` (GitHub CLI) for backup.
-
+> **Requires:** `curl`, `git`
+> **Optional:** `gh` (GitHub CLI) for `svman backup -c`
 ---
 
 ## Quick Start
