@@ -3,9 +3,16 @@
 
 VAULT_DIR="$HOME/.local/bin/vault"
 BIN_DIR="$HOME/.local/bin"
-SHELL_RC="$HOME/.zshrc"
 CONFIG_DIR="$HOME/.config/svman"
 EDITOR_WHITELIST_FILE="$CONFIG_DIR/editors"
+
+if [[ -n "$ZSH_VERSION" ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ -n "$BASH_VERSION" ]]; then
+    SHELL_RC="$HOME/.bashrc"
+else
+    SHELL_RC="$HOME/.profile"
+fi
 
 mkdir -p "$VAULT_DIR" "$CONFIG_DIR"
 

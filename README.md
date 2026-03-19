@@ -7,12 +7,21 @@ A lightweight CLI tool for creating, organizing, installing and managing scripts
 
 ## Installation
 ```bash
-mkdir -p ~/.local/bin
 curl -fsSL https://raw.githubusercontent.com/cldsouth/svman/main/svman \
   -o ~/.local/bin/svman
 chmod +x ~/.local/bin/svman
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+```
+
+Then add `~/.local/bin` to your PATH:
+```bash
+# bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# fish
+fish_add_path ~/.local/bin
 ```
 
 > **Dependencies:** `bash`, `curl`, `git`. Optional: `gh` (GitHub CLI) for backup.
@@ -32,7 +41,7 @@ svman list               # see everything in your vault
 
 ### Create
 ```bash
-svman new myscript               # opens default editor (nano)
+svman new myscript               # opens default editor (nano, configurable)
 svman new myscript -e vim        # open with a specific editor
 svman new myscript -f network    # save into a folder
 ```
