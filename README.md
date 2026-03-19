@@ -1,7 +1,7 @@
 # svman — script vault manager
 ![version](https://img.shields.io/badge/version-0.1.0--alpha-blue)
 
-A lightweight CLI tool for creating, organizing, installing and managing scripts. Store scripts in a structured vault, install them from GitHub, and back everything up with one command.
+A lightweight CLI tool for creating, organizing, installing and managing scripts. Store scripts in a structured vault, install them from GitHub, and back everything up with one tool.
 
 ---
 
