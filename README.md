@@ -86,19 +86,19 @@ Folders appear as separate sections in `svman list`:
 Install scripts directly from GitHub repositories.
 ```bash
 svman pull                            # interactive search
-svman pull dylanaraps/pure-bash-bible # browse a specific repo
-svman pull "dotfiles manager"         # keyword search
+svman pull cldsouth/svman             # browse a specific repo
+svman pull "vault manager"            # keyword search
 ```
 
 Search results are paginated. Navigate with:
 - **number** — select a result
 - **n** — next page
 - **b** — back
-- **p3** — jump to page 3
+- **p<n>** — jump to page n
 - **q** — quit
 ```bash
-svman pull dylanaraps/pure-bash-bible -f utils    # install into a folder
-svman pull -p 8                                    # show 8 results per page
+svman pull cldsouth/svman -f utils    # install into a folder
+svman pull -p 8                       # show 8 results per page
 ```
 
 ---
