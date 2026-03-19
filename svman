@@ -919,14 +919,14 @@ _config_load
 # ── dispatch ───────────────────────────────────────────────────────────────────
 
 case "$1" in
-    new)         shift; _new    "$@" ;;
-    edit)        shift; _edit   "$@" ;;
-    list|ls|l)   shift; _list   "$@" ;;
-    remove|rm)   shift; _remove "$@" ;;
-    nuke)        _nuke ;;
-    run)         shift; _run    "$@" ;;
-    pull)        shift; _pull   "$@" ;;
-    backup)      _backup "$2" ;;
+    new)                        shift; _new    "$@" ;;
+    edit)                       shift; _edit   "$@" ;;
+    list|ls|l|vault|v)          shift; _list "$@" ;;
+    remove|rm)                  shift; _remove "$@" ;;
+    nuke)                       _nuke ;;
+    run)                        shift; _run    "$@" ;;
+    pull)                       shift; _pull   "$@" ;;
+    backup)                     _backup "$2" ;;
     folder|folders)
         case "$2" in
             new)    _folder_new    "$3" "$4" ;;
