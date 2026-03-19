@@ -921,7 +921,7 @@ _config_load
 case "$1" in
     new)                        shift; _new    "$@" ;;
     edit)                       shift; _edit   "$@" ;;
-    list|ls|l|vault|v)          shift; _list "$@" ;;
+    list|ls|l|vault|v)          shift; _list   "$@" ;;
     remove|rm)                  shift; _remove "$@" ;;
     nuke)                       _nuke ;;
     run)                        shift; _run    "$@" ;;
