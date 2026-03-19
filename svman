@@ -1,0 +1,964 @@
+#!/usr/bin/env bash
+# ~/.local/bin/svman (script vault manager)
+
+VAULT_DIR="$HOME/.local/bin/vault"
+BIN_DIR="$HOME/.local/bin"
+SHELL_RC="$HOME/.zshrc"
+CONFIG_DIR="$HOME/.config/svman"
+EDITOR_WHITELIST_FILE="$CONFIG_DIR/editors"
+
+mkdir -p "$VAULT_DIR" "$CONFIG_DIR"
+
+if [[ ! -f "$EDITOR_WHITELIST_FILE" ]]; then
+    cat > "$EDITOR_WHITELIST_FILE" <<'EOF'
+nano terminal
+vim terminal
+nvim terminal
+kate gui
+gedit gui
+micro terminal
+EOF
+fi
+
+# ── colors ─────────────────────────────────────────────────────────────────────
+
+R='\033[0;31m'
+G='\033[0;32m'
+Y='\033[0;33m'
+B='\033[0;34m'
+D='\033[2m'
+N='\033[0m'
+
+# ── visuals ────────────────────────────────────────────────────────────────────
+
+_spinner() {
+    local pid=$1 msg="${2:-working}"
+    local frames=('|' '/' '-' '\\')
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r  ${D}[%s]${N} %s..." "${frames[$((i % 4))]}" "$msg"
+        i=$((i + 1))
+        sleep 0.1
+    done
+    printf "\r\033[K"
+}
+
+_dot_progress() {
+    local msg="${1:-loading}"
+    printf "  ${D}%s${N}" "$msg"
+    for _ in 1 2 3; do
+        sleep 0.3
+        printf "${D}.${N}"
+    done
+    printf "\r\033[K"
+}
+
+_ok()      { printf "  ${G}[+]${N} %s\n" "$*"; }
+_err()     { printf "  ${R}[!]${N} %s\n" "$*" >&2; }
+_info()    { printf "  ${D}[>]${N} %s\n" "$*"; }
+_warn()    { printf "  ${Y}[!]${N} %s\n" "$*"; }
+_sep()     { printf "  ${D}%s${N}\n" "----------------------------------------"; }
+_confirm() { printf "  ${Y}[?]${N} %s\n" "$*"; }
+
+# ── distro detect ──────────────────────────────────────────────────────────────
+
+_install_hint() {
+    local pkg="$1"
+
+    declare -A aliases=(
+        [gh:pacman]="github-cli"
+        [nvim:apt]="neovim"
+        [nvim:dnf]="neovim"
+        [nvim:zypper]="neovim"
+        [nvim:brew]="neovim"
+    )
+
+    declare -A gh_cmds=(
+        [apt]="curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | sudo tee /etc/apt/sources.list.d/github-cli.list && sudo apt update && sudo apt install gh"
+        [dnf]="dnf install 'dnf-command(config-manager)' && dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo && dnf install gh"
+        [zypper]="zypper addrepo https://cli.github.com/packages/rpm/gh-cli.repo && zypper ref && zypper install gh"
+    )
+
+    local mgr=""
+    for m in pacman apt dnf brew zypper; do
+        command -v "$m" &>/dev/null && { mgr="$m"; break; }
+    done
+
+    if [[ -z "$mgr" ]]; then
+        [[ "$pkg" == "gh" ]] \
+            && echo "see: https://github.com/cli/cli#installation" \
+            || echo "(install $pkg with your package manager)"
+        return
+    fi
+
+    if [[ "$pkg" == "gh" && -n "${gh_cmds[$mgr]:-}" ]]; then
+        echo "${gh_cmds[$mgr]}"; return
+    fi
+
+    local resolved="${aliases[${pkg}:${mgr}]:-$pkg}"
+    case "$mgr" in
+        pacman) echo "pacman -S $resolved" ;;
+        apt)    echo "apt install $resolved" ;;
+        dnf)    echo "dnf install $resolved" ;;
+        brew)   echo "brew install $resolved" ;;
+        zypper) echo "zypper install $resolved" ;;
+    esac
+}
+
+# ── config ─────────────────────────────────────────────────────────────────────
+
+CONFIG_FILE="$CONFIG_DIR/config"
+
+declare -A SVMAN_DEFAULTS=(
+    [pull_page_size]=5
+    [pull_desc_length]=55
+    [default_editor]=nano
+)
+
+_config_load() {
+    [[ -f "$CONFIG_FILE" ]] || return
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        export "SVMAN_${key^^}"="$value"
+    done < "$CONFIG_FILE"
+}
+
+_config_get() {
+    local key="$1"
+    local env_var="SVMAN_${key^^}"
+    echo "${!env_var:-${SVMAN_DEFAULTS[$key]:-}}"
+}
+
+_config_set() {
+    local key="$1" value="$2"
+    if [[ -z "$key" || -z "$value" ]]; then
+        _err "usage: svman config set <key> <value>"; return 1
+    fi
+    if [[ -z "${SVMAN_DEFAULTS[$key]+x}" ]]; then
+        _err "unknown config key '$key'."
+        _info "valid keys: ${!SVMAN_DEFAULTS[*]}"
+        return 1
+    fi
+    mkdir -p "$CONFIG_DIR"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE"
+    else
+        echo "${key}=${value}" >> "$CONFIG_FILE"
+    fi
+    export "SVMAN_${key^^}"="$value"
+    _ok "'$key' set to '$value'"
+}
+
+_config_unset() {
+    local key="$1"
+    if [[ -z "$key" ]]; then
+        _err "usage: svman config unset <key>"; return 1
+    fi
+    if ! grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        _warn "'$key' is not set (default: ${SVMAN_DEFAULTS[$key]:-unset})"
+        return
+    fi
+    sed -i "/^${key}=/d" "$CONFIG_FILE"
+    _ok "'$key' unset (restored to default: ${SVMAN_DEFAULTS[$key]:-unset})"
+}
+
+_config_list() {
+    printf "\n  ${D}.-- config${N} ${D}(%s)${N}\n" "$CONFIG_FILE"
+    _sep
+    for key in "${!SVMAN_DEFAULTS[@]}"; do
+        local current default tag
+        current=$(_config_get "$key")
+        default="${SVMAN_DEFAULTS[$key]}"
+        [[ "$current" != "$default" ]] \
+            && tag="${Y}custom${N}" \
+            || tag="${D}default${N}"
+        printf "  ${D}|${N}  %-22s %-15s %b\n" "$key" "$current" "$tag"
+    done
+    _sep
+    echo ""
+}
+
+# ── editor ─────────────────────────────────────────────────────────────────────
+
+_editor_type() {
+    grep -m1 "^$1 " "$EDITOR_WHITELIST_FILE" 2>/dev/null | awk '{print $2}'
+}
+
+_editor_exists_in_whitelist() {
+    grep -q "^$1 " "$EDITOR_WHITELIST_FILE" 2>/dev/null
+}
+
+_validate_editor() {
+    local ed="$1"
+    if [[ -z "$ed" ]]; then
+        _err "no editor specified."
+        _info "usage: -e <editor>  (e.g. -e vim)"
+        _info "available: $(awk '{print $1}' "$EDITOR_WHITELIST_FILE" | tr '\n' ' ')"
+        return 1
+    fi
+    if ! _editor_exists_in_whitelist "$ed"; then
+        _err "'$ed' is not in the editor whitelist."
+        _info "add it with: svman editor add $ed [terminal|gui]"
+        return 1
+    fi
+    if ! command -v "$ed" &>/dev/null; then
+        _err "'$ed' is whitelisted but not installed."
+        _info "install with: $(_install_hint "$ed")"
+        return 1
+    fi
+    return 0
+}
+
+_open() {
+    local target="$1" ed="${2:-}"
+    [[ -z "$ed" ]] && ed="$(_config_get default_editor)"
+    _validate_editor "$ed" || return 1
+    local type
+    type=$(_editor_type "$ed")
+    if [[ "$type" == "gui" ]]; then
+        _info "opening in $ed (GUI)..."
+        "$ed" "$target" &
+        local gui_pid=$!
+        _info "press Enter when done editing..."
+        read -r
+        kill -0 "$gui_pid" 2>/dev/null && _warn "$ed may still be open. proceeding anyway."
+    else
+        _info "opening in $ed..."
+        "$ed" "$target"
+    fi
+}
+
+_editor_add() {
+    local name="$1" type="${2:-terminal}"
+    if [[ -z "$name" ]]; then
+        _err "no editor name specified."; return 1
+    fi
+    if [[ "$type" != "terminal" && "$type" != "gui" ]]; then
+        _err "type must be 'terminal' or 'gui'"; return 1
+    fi
+    if ! command -v "$name" &>/dev/null; then
+        _warn "'$name' does not appear to be installed."
+        _confirm "add anyway? [y/N]"
+        read -rp "  > " c
+        [[ "${c,,}" != "y" ]] && { _info "cancelled."; return; }
+    fi
+    if _editor_exists_in_whitelist "$name"; then
+        _warn "'$name' already in whitelist."
+        _confirm "overwrite? [y/N]"
+        read -rp "  > " c
+        [[ "${c,,}" != "y" ]] && { _info "cancelled."; return; }
+        sed -i "/^$name /d" "$EDITOR_WHITELIST_FILE"
+    fi
+    echo "$name $type" >> "$EDITOR_WHITELIST_FILE"
+    _ok "'$name' added as $type editor."
+}
+
+_editor_remove() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        _err "no editor name specified."; return 1
+    fi
+    if ! _editor_exists_in_whitelist "$name"; then
+        _err "'$name' not in whitelist."; return 1
+    fi
+    sed -i "/^$name /d" "$EDITOR_WHITELIST_FILE"
+    _ok "'$name' removed from whitelist."
+}
+
+_editor_list() {
+    printf "\n  ${D}.-- editor whitelist${N}\n"
+    _sep
+    while read -r name type; do
+        local status
+        command -v "$name" &>/dev/null \
+            && status="${G}installed${N}" \
+            || status="${R}not found${N}"
+        printf "  ${D}|${N}  %-12s ${D}%-10s${N} %b\n" "$name" "$type" "$status"
+    done < "$EDITOR_WHITELIST_FILE"
+    _sep
+    echo ""
+}
+
+# ── path/folder helpers ────────────────────────────────────────────────────────
+
+_load_path() {
+    if ! grep -q "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
+        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$SHELL_RC"
+        _ok "PATH updated ($SHELL_RC)"
+    fi
+    export PATH="$BIN_DIR:$PATH"
+}
+
+_symlink() {
+    ln -sf "$1" "$BIN_DIR/$2"
+}
+
+_detect_shebang() {
+    case "$1" in
+        *.py)   echo "#!/usr/bin/env python3" ;;
+        *.zsh)  echo "#!/usr/bin/env zsh" ;;
+        *.js)   echo "#!/usr/bin/env node" ;;
+        *.rb)   echo "#!/usr/bin/env ruby" ;;
+        *.pl)   echo "#!/usr/bin/env perl" ;;
+        *.sh|*) echo "#!/usr/bin/env bash" ;;
+    esac
+}
+
+_resolve_folder() {
+    [[ "$1" == /* ]] && echo "$1" || echo "$VAULT_DIR/$1"
+}
+
+_folder_title() {
+    local title_file="$1/.title"
+    [[ -f "$title_file" ]] && cat "$title_file" || basename "$1"
+}
+
+_require_flag_value() {
+    local flag="$1" value="$2"
+    if [[ -z "$value" || "$value" == -* ]]; then
+        _err "flag '$flag' requires a value."
+        return 1
+    fi
+}
+
+_truncate() {
+    local str="$1" max="${2:-60}"
+    (( ${#str} > max )) && echo "${str:0:$max}..." || echo "$str"
+}
+
+# ── commands ───────────────────────────────────────────────────────────────────
+
+_new() {
+    local name="" folder="" title="" custom_editor=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--folder) _require_flag_value "$1" "$2" || return 1; folder="$2"; shift 2 ;;
+            -t|--title)  _require_flag_value "$1" "$2" || return 1; title="$2";  shift 2 ;;
+            -e|--editor) _require_flag_value "$1" "$2" || return 1; custom_editor="$2"; shift 2 ;;
+            *) [[ -z "$name" ]] && name="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && read -rp "  Script name: " name
+
+    local target_dir="$VAULT_DIR"
+    if [[ -n "$folder" ]]; then
+        target_dir="$(_resolve_folder "$folder")"
+        mkdir -p "$target_dir"
+        [[ ! -f "$target_dir/.title" ]] && echo "${title:-$folder}" > "$target_dir/.title"
+    fi
+
+    local target="$target_dir/$name"
+    local is_new=false
+    if [[ ! -f "$target" ]]; then
+        is_new=true
+        local shebang
+        shebang=$(_detect_shebang "$name")
+        printf '%s\n# %s\n\n' "$shebang" "$name" > "$target"
+        _info "created '$name' -- shebang: $shebang"
+    else
+        _info "'$name' already exists -- opening for edit."
+    fi
+
+    _open "$target" "$custom_editor" || {
+        $is_new && rm -f "$target"
+        return 1
+    }
+
+    echo ""
+    _sep
+    _confirm "save '$name'? [Y/n]"
+    read -rp "  > " confirm
+    if [[ "${confirm,,}" == "n" ]]; then
+        $is_new && rm -f "$target"
+        _info "discarded. no changes written."
+        return
+    fi
+
+    chmod +x "$target"
+    _symlink "$target" "$name"
+    _load_path
+    _sep
+    _ok "'$name' saved and marked executable."
+    _ok "location : $target"
+    _ok "callable : $name"
+    [[ -n "$folder" ]] && _ok "folder   : $folder ($(_folder_title "$target_dir"))"
+}
+
+_edit() {
+    local name="" folder="" custom_editor=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--folder) _require_flag_value "$1" "$2" || return 1; folder="$2"; shift 2 ;;
+            -e|--editor) _require_flag_value "$1" "$2" || return 1; custom_editor="$2"; shift 2 ;;
+            *) [[ -z "$name" ]] && name="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && read -rp "  Script to edit: " name
+
+    local search_dir="$VAULT_DIR"
+    [[ -n "$folder" ]] && search_dir="$(_resolve_folder "$folder")"
+
+    local target="$search_dir/$name"
+    if [[ ! -f "$target" ]]; then
+        if [[ -z "$folder" ]]; then
+            local found
+            found=$(find "$VAULT_DIR" -name "$name" -not -name ".*" | head -1)
+            if [[ -n "$found" ]]; then
+                target="$found"
+                _info "found '$name' at $target"
+            else
+                _err "'$name' not found in vault."; return 1
+            fi
+        else
+            _err "'$name' not found in folder '$folder'."; return 1
+        fi
+    fi
+
+    local snapshot="/tmp/_svman_snapshot_${name}_$$"
+    cp "$target" "$snapshot"
+    _info "snapshot taken."
+
+    _open "$target" "$custom_editor" || {
+        cp "$snapshot" "$target"
+        rm -f "$snapshot"
+        _info "editor error. snapshot restored."
+        return 1
+    }
+
+    echo ""
+    _sep
+    _confirm "save changes to '$name'? [Y/n]"
+    read -rp "  > " confirm
+    if [[ "${confirm,,}" == "n" ]]; then
+        cp "$snapshot" "$target"
+        rm -f "$snapshot"
+        _info "discarded. '$name' restored to previous state."
+        return
+    fi
+
+    rm -f "$snapshot"
+    chmod +x "$target"
+    _sep
+    _ok "'$name' updated."
+    _ok "location : $target"
+}
+
+_list() {
+    local filter="$1"
+    echo ""
+
+    local root_scripts folders
+    root_scripts=$(find "$VAULT_DIR" -maxdepth 1 -type f -not -name ".*" 2>/dev/null)
+    folders=$(find "$VAULT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+
+    # filtered: show only matching folders
+    if [[ -n "$filter" ]]; then
+        local matched=false
+        if [[ -n "$folders" ]]; then
+            while IFS= read -r dir; do
+                local fname title
+                fname=$(basename "$dir")
+                title=$(_folder_title "$dir")
+                if [[ "$fname" == *"$filter"* || "$title" == *"$filter"* ]]; then
+                    matched=true
+                    printf "  ${Y}.-- %s${N} ${D}[%s]${N}\n" "$title" "$fname"
+                    _sep
+                    local scripts
+                    scripts=$(find "$dir" -maxdepth 1 -type f -not -name ".*" 2>/dev/null)
+                    if [[ -n "$scripts" ]]; then
+                        echo "$scripts" | while read -r f; do
+                            printf "  ${D}|${N}  %s\n" "$(basename "$f")"
+                        done
+                    else
+                        printf "  ${D}|${N}  ${D}(empty)${N}\n"
+                    fi
+                    _sep
+                    echo ""
+                fi
+            done <<< "$folders"
+        fi
+        $matched || _err "no folder matching '$filter' found."
+        return
+    fi
+
+    # full list
+    printf "  ${B}.-- vault${N} ${D}(%s)${N}\n" "$VAULT_DIR"
+    _sep
+    if [[ -n "$root_scripts" ]]; then
+        echo "$root_scripts" | while read -r f; do
+            printf "  ${D}|${N}  %s\n" "$(basename "$f")"
+        done
+    else
+        printf "  ${D}|${N}  ${D}(empty)${N}\n"
+    fi
+    _sep
+
+    if [[ -n "$folders" ]]; then
+        while IFS= read -r dir; do
+            local fname title
+            fname=$(basename "$dir")
+            title=$(_folder_title "$dir")
+            echo ""
+            printf "  ${Y}.-- %s${N} ${D}[%s]${N}\n" "$title" "$fname"
+            _sep
+            local scripts
+            scripts=$(find "$dir" -maxdepth 1 -type f -not -name ".*" 2>/dev/null)
+            if [[ -n "$scripts" ]]; then
+                echo "$scripts" | while read -r f; do
+                    printf "  ${D}|${N}  %s\n" "$(basename "$f")"
+                done
+            else
+                printf "  ${D}|${N}  ${D}(empty)${N}\n"
+            fi
+            _sep
+        done <<< "$folders"
+    fi
+
+    echo ""
+}
+
+_folder_new() {
+    local fname="$1" title="$2"
+    if [[ -z "$fname" ]]; then
+        _err "no folder name specified."; return 1
+    fi
+    local dir="$VAULT_DIR/$fname"
+    if [[ -d "$dir" ]]; then
+        _warn "folder '$fname' already exists."; return
+    fi
+    mkdir -p "$dir"
+    echo "${title:-$fname}" > "$dir/.title"
+    _ok "folder '$fname' created (title: ${title:-$fname})"
+}
+
+_folder_rename() {
+    local fname="$1" new_title="$2"
+    [[ -z "$fname" ]] && read -rp "  Folder name: " fname
+    local dir="$VAULT_DIR/$fname"
+    [[ ! -d "$dir" ]] && { _err "folder '$fname' not found."; return 1; }
+    [[ -z "$new_title" ]] && read -rp "  New title: " new_title
+    echo "$new_title" > "$dir/.title"
+    _ok "folder '$fname' title set to '$new_title'"
+}
+
+_remove() {
+    if [[ $# -eq 0 ]]; then
+        local name
+        read -rp "  Script to remove: " name
+        set -- "$name"
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--folder)
+                _require_flag_value "$1" "$2" || return 1
+                local fname="$2" dir
+                dir="$VAULT_DIR/$fname"
+                [[ ! -d "$dir" ]] && { _err "folder '$fname' not found."; return 1; }
+                local count
+                count=$(find "$dir" -type f -not -name ".*" | wc -l)
+                echo ""
+                _sep
+                _warn "folder   : $dir"
+                _warn "title    : $(_folder_title "$dir")"
+                _warn "contains : $count script(s)"
+                _sep
+                printf "  ${R}[!]${N} this will permanently delete the folder and all scripts inside.\n"
+                _confirm "delete folder '$fname'? [y/N]"
+                read -rp "  > " c
+                [[ "${c,,}" != "y" ]] && { _info "cancelled."; return; }
+                find "$dir" -type f -not -name ".*" | while read -r f; do
+                    rm -f "$BIN_DIR/$(basename "$f")"
+                done
+                rm -rf "$dir"
+                _ok "folder '$fname' removed."
+                return
+                ;;
+            -a|--all)
+                echo ""
+                _sep
+                local total
+                total=$(find "$VAULT_DIR" -type f -not -name ".*" | wc -l)
+                _warn "this will delete ALL $total script(s) in the vault."
+                _warn "all folders and their contents will also be removed."
+                _sep
+                printf "  ${R}[!]${N} this action is permanent and cannot be undone.\n"
+                _confirm "clear entire vault? [y/N]"
+                read -rp "  > " c
+                [[ "${c,,}" != "y" ]] && { _info "cancelled."; return; }
+                find "$VAULT_DIR" -type f -not -name ".*" | while read -r f; do
+                    rm -f "$BIN_DIR/$(basename "$f")"
+                done
+                find "$VAULT_DIR" -mindepth 1 -maxdepth 1 -type d | xargs rm -rf
+                find "$VAULT_DIR" -maxdepth 1 -type f -not -name ".*" | xargs rm -f
+                _ok "vault cleared."
+                return
+                ;;
+            *)
+                local name="$1" target
+                target=$(find "$VAULT_DIR" -name "$name" -not -name ".*" | head -1)
+                if [[ -z "$target" || ! -f "$target" ]]; then
+                    _err "'$name' not found in vault."; return 1
+                fi
+                echo ""
+                _sep
+                _info "target   : $target"
+                _info "size     : $(wc -c < "$target") bytes"
+                _info "modified : $(date -r "$target" '+%Y-%m-%d %H:%M')"
+                _sep
+                printf "  ${R}[!]${N} this action is permanent and cannot be undone.\n"
+                _confirm "delete '$name'? [y/N]"
+                read -rp "  > " c
+                if [[ "${c,,}" != "y" ]]; then
+                    _info "cancelled. '$name' was not removed."
+                    return
+                fi
+                rm -f "$target" "$BIN_DIR/$name"
+                _sep
+                _ok "'$name' permanently removed."
+                return
+                ;;
+        esac
+        shift
+    done
+}
+
+_nuke() {
+    echo ""
+    _sep
+    printf "  ${R}[!]${N} NUKE will permanently delete:\n"
+    _warn "  vault   : $VAULT_DIR"
+    _warn "  config  : $CONFIG_DIR"
+    _warn "  symlinks: $BIN_DIR"
+    local total
+    total=$(find "$VAULT_DIR" -type f -not -name ".*" 2>/dev/null | wc -l)
+    _warn "  scripts : $total total"
+    _sep
+    printf "  ${R}[!]${N} this cannot be undone.\n"
+    echo ""
+    printf "  ${Y}type 'confirm nuke' to proceed:${N} "
+    read -rp "" confirm
+    if [[ "$confirm" != "confirm nuke" ]]; then
+        _info "cancelled. nothing was deleted."
+        return
+    fi
+    find "$VAULT_DIR" -type f -not -name ".*" 2>/dev/null | while read -r f; do
+        rm -f "$BIN_DIR/$(basename "$f")"
+    done
+    rm -rf "$VAULT_DIR" "$CONFIG_DIR"
+    _sep
+    _ok "nuke complete. svman has been wiped."
+    _info "remove PATH entry from $SHELL_RC manually if desired."
+}
+
+_run() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        _err "no script name specified."
+        _info "usage: svman run <name> [args]"
+        return 1
+    fi
+    shift
+    local target
+    target=$(find "$VAULT_DIR" -name "$name" -not -name ".*" | head -1)
+    if [[ -z "$target" || ! -f "$target" ]]; then
+        _err "'$name' not found in vault."; return 1
+    fi
+    _info "running '$name'..."
+    echo ""
+    "$target" "$@"
+}
+
+_pull() {
+    local query="" folder="" title="" page_size=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--folder) _require_flag_value "$1" "$2" || return 1; folder="$2"; shift 2 ;;
+            -t|--title)  _require_flag_value "$1" "$2" || return 1; title="$2";  shift 2 ;;
+            -p|--plen)   _require_flag_value "$1" "$2" || return 1; page_size="$2"; shift 2 ;;
+            *)           [[ -z "$query" ]] && query="$1"; shift ;;
+        esac
+    done
+
+    [[ -z "$query" ]] && read -rp "  Search GitHub (user/repo or keyword): " query
+
+    # plen priority: flag > config > default
+    [[ -z "$page_size" ]] && page_size="$(_config_get pull_page_size)"
+
+    local target_dir="$VAULT_DIR"
+    if [[ -n "$folder" ]]; then
+        target_dir="$VAULT_DIR/$folder"
+        mkdir -p "$target_dir"
+        [[ ! -f "$target_dir/.title" ]] && echo "${title:-$folder}" > "$target_dir/.title"
+    fi
+
+    # ── user/repo: list files ──────────────────────────────────────────────────
+    if [[ "$query" =~ ^[^/]+/[^/]+$ ]]; then
+        local files
+        curl -sf "https://api.github.com/repos/$query/contents" \
+            | grep '"name"' | awk -F'"' '{print $4}' > /tmp/_svman_files &
+        _spinner $! "fetching $query"
+        wait
+        files=$(cat /tmp/_svman_files)
+        [[ -z "$files" ]] && { _err "repo not found or empty."; return 1; }
+
+        local file_arr=()
+        while IFS= read -r line; do file_arr+=("$line"); done <<< "$files"
+
+        printf "\n  ${D}.-- %s${N}\n" "$query"
+        _sep
+        for i in "${!file_arr[@]}"; do
+            printf "  ${D}|${N}  %3d)  %s\n" "$((i+1))" "${file_arr[$i]}"
+        done
+        _sep
+        echo ""
+
+        while true; do
+            read -rp "  Select file number or [q]uit: " sel
+            [[ "$sel" == "q" || "$sel" == "quit" ]] && { _info "cancelled."; return 0; }
+            if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#file_arr[@]} )); then
+                _err "invalid selection."; continue
+            fi
+            break
+        done
+
+        local fname="${file_arr[$((sel-1))]}"
+        local raw_url="https://raw.githubusercontent.com/$query/main/$fname"
+        local target="$target_dir/$fname"
+
+        _dot_progress "downloading $fname"
+        curl -sf "$raw_url" -o "$target" 2>/dev/null \
+            || curl -sf "${raw_url/main/master}" -o "$target" \
+            || { _err "could not fetch '$fname'."; return 1; }
+
+    # ── keyword: repo search ───────────────────────────────────────────────────
+    else
+        local raw
+        curl -sf \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/search/repositories?q=${query}+language:shell&sort=stars&per_page=100" \
+            > /tmp/_svman_search &
+        _spinner $! "searching GitHub"
+        wait
+        raw=$(cat /tmp/_svman_search)
+
+        local repo_arr=() desc_arr=()
+        while IFS= read -r line; do repo_arr+=("$line"); done < <(
+            echo "$raw" | grep '"full_name"' | awk -F'"' '{print $4}'
+        )
+        while IFS= read -r line; do desc_arr+=("$line"); done < <(
+            echo "$raw" | grep '"description"' | awk -F'"' '{print $4}'
+        )
+        [[ ${#repo_arr[@]} -eq 0 ]] && { _err "no results for '$query'."; return 1; }
+
+        local page=0 total=${#repo_arr[@]}
+        local total_pages=$(( (total + page_size - 1) / page_size ))
+
+        # paginated selection loop
+        while true; do
+            local from=$(( page * page_size ))
+            local to=$(( from + page_size ))
+            (( to > total )) && to=$total
+
+            printf "\n  ${D}.-- results: %s${N} ${D}(page %d/%d, %d-%d of %d)${N}\n" \
+                "$query" "$((page+1))" "$total_pages" "$((from+1))" "$to" "$total"
+            _sep
+            for (( i=from; i<to; i++ )); do
+                printf "  ${D}|${N}  %3d)  %-35s  %s\n" \
+                    "$((i+1))" \
+                    "${repo_arr[$i]}" \
+                    "$(_truncate "${desc_arr[$i]:-}" "$(_config_get pull_desc_length)")"
+            done
+            _sep
+            printf "  ${D}  n: next  b: back  p<n>: jump to page  q: quit${N}\n"
+            echo ""
+
+            read -rp "  Select number or navigate: " sel
+
+            case "$sel" in
+                n|next)
+                    (( page + 1 >= total_pages )) && { _warn "already on last page."; continue; }
+                    (( page++ )); continue ;;
+                b|back)
+                    (( page == 0 )) && { _warn "already on first page."; continue; }
+                    (( page-- )); continue ;;
+                p[0-9]*)
+                    local target_page=$(( ${sel#p} - 1 ))
+                    if (( target_page < 0 || target_page >= total_pages )); then
+                        _err "page $((target_page+1)) out of range (1-$total_pages)."; continue
+                    fi
+                    page=$target_page; continue ;;
+                q|quit|exit)
+                    _info "search cancelled."; return 0 ;;
+            esac
+
+            if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > total )); then
+                _err "invalid selection."; continue
+            fi
+
+            _pull "${repo_arr[$((sel-1))]}" ${folder:+-f "$folder"} ${title:+-t "$title"}
+            return
+        done
+    fi
+
+    # install and link
+    chmod +x "$target"
+    _symlink "$target" "$fname"
+    _load_path
+    _sep
+    _ok "'$fname' installed from $query."
+    _ok "location : $target"
+    _ok "callable : $fname"
+    [[ -n "$folder" ]] && _ok "folder   : $folder"
+}
+
+_backup() {
+    local flag="$1"
+    local git_dir
+    git_dir=$(git -C "$VAULT_DIR" rev-parse --git-dir 2>/dev/null)
+
+    case "$flag" in
+        --create|-c)
+            if ! command -v gh &>/dev/null; then
+                _err "'gh' not found."
+                _info "install with: $(_install_hint "gh")"
+                return 1
+            fi
+            local repo_name
+            read -rp "  New repo name (default: svman-vault): " repo_name
+            repo_name="${repo_name:-svman-vault}"
+            if [[ -z "$git_dir" ]]; then
+                _dot_progress "initializing git"
+                git -C "$VAULT_DIR" init -q
+                git -C "$VAULT_DIR" add .
+                git -C "$VAULT_DIR" commit -q -m "initial vault backup"
+            fi
+            _dot_progress "creating GitHub repo"
+            gh repo create "$repo_name" --public --source="$VAULT_DIR" --push
+            _sep
+            _ok "pushed to github.com/$(gh api user -q .login)/$repo_name"
+            ;;
+        --archive|-a)
+            local archive="$HOME/svman-backup-$(date +%Y%m%d).tar.gz"
+            _dot_progress "archiving vault"
+            tar -czf "$archive" -C "$VAULT_DIR" .
+            _sep
+            _ok "archive saved : $archive"
+            _ok "size          : $(du -sh "$archive" | cut -f1)"
+            ;;
+        *)
+            if [[ -z "$git_dir" ]]; then
+                _err "$VAULT_DIR is not a git repo."
+                _info "use 'svman backup -c' to set one up."
+                return 1
+            fi
+            _dot_progress "pushing to remote"
+            git -C "$VAULT_DIR" add .
+            git -C "$VAULT_DIR" commit -q -m "vault backup $(date '+%Y-%m-%d %H:%M')"
+            git -C "$VAULT_DIR" push
+            _sep
+            _ok "vault pushed."
+            _ok "remote : $(git -C "$VAULT_DIR" remote get-url origin 2>/dev/null)"
+            ;;
+    esac
+}
+
+_help() {
+    printf "\n  ${B}svman${N} ${D}// script vault manager${N}\n"
+    echo ""
+    printf "  ${D}-- scripts ────────────────────────────────${N}\n"
+    printf "  ${Y}new${N}    <name> [-f folder] [-e editor]\n"
+    printf "  ${Y}edit${N}   <name> [-f folder] [-e editor]\n"
+    printf "  ${Y}run${N}    <name> [args]\n"
+    printf "  ${Y}list${N}   [folder]\n"
+    printf "  ${Y}pull${N}   [user/repo] [-f folder] [-p plen]\n"
+    echo ""
+    printf "  ${D}-- remove ─────────────────────────────────${N}\n"
+    printf "  ${Y}remove${N} <name>\n"
+    printf "  ${Y}remove${N} -f <folder>\n"
+    printf "  ${Y}remove${N} -a, --all\n"
+    printf "  ${Y}nuke${N}\n"
+    echo ""
+    printf "  ${D}-- folders ────────────────────────────────${N}\n"
+    printf "  ${Y}folder new${N}    <name> [title]\n"
+    printf "  ${Y}folder rename${N} <name> <title>\n"
+    echo ""
+    printf "  ${D}-- editors ────────────────────────────────${N}\n"
+    printf "  ${Y}editor add${N}    <name> [terminal|gui]\n"
+    printf "  ${Y}editor remove${N} <name>\n"
+    printf "  ${Y}editor list${N}\n"
+    echo ""
+    printf "  ${D}-- config ─────────────────────────────────${N}\n"
+    printf "  ${Y}config set${N}   <key> <value>\n"
+    printf "  ${Y}config unset${N} <key>\n"
+    printf "  ${Y}config list${N}\n"
+    echo ""
+    printf "  ${D}-- backup ─────────────────────────────────${N}\n"
+    printf "  ${Y}backup${N}\n"
+    printf "  ${Y}backup${N} -c, --create\n"
+    printf "  ${Y}backup${N} -a, --archive\n"
+    echo ""
+}
+
+# ── load config on start ───────────────────────────────────────────────────────
+
+_config_load
+
+# ── dispatch ───────────────────────────────────────────────────────────────────
+
+case "$1" in
+    new)         shift; _new    "$@" ;;
+    edit)        shift; _edit   "$@" ;;
+    list|ls|l)   shift; _list   "$@" ;;
+    remove|rm)   shift; _remove "$@" ;;
+    nuke)        _nuke ;;
+    run)         shift; _run    "$@" ;;
+    pull)        shift; _pull   "$@" ;;
+    backup)      _backup "$2" ;;
+    folder|folders)
+        case "$2" in
+            new)    _folder_new    "$3" "$4" ;;
+            rename) _folder_rename "$3" "$4" ;;
+            *)      printf "\n  ${B}svman folder${N}\n\n"
+                    printf "  ${Y}folder new${N}    <name> [title]\n"
+                    printf "  ${Y}folder rename${N} <name> <title>\n\n" ;;
+        esac
+        ;;
+    editor)
+        case "$2" in
+            add)    _editor_add    "$3" "$4" ;;
+            remove) _editor_remove "$3" ;;
+            list)   _editor_list ;;
+            *)      printf "\n  ${B}svman editor${N}\n\n"
+                    printf "  ${Y}editor add${N}    <name> [terminal|gui]\n"
+                    printf "  ${Y}editor remove${N} <name>\n"
+                    printf "  ${Y}editor list${N}\n\n" ;;
+        esac
+        ;;
+    config)
+        case "$2" in
+            set)    _config_set   "$3" "$4" ;;
+            unset)  _config_unset "$3" ;;
+            list)   _config_list ;;
+            *)      printf "\n  ${B}svman config${N}\n\n"
+                    printf "  ${Y}config set${N}   <key> <value>\n"
+                    printf "  ${Y}config unset${N} <key>\n"
+                    printf "  ${Y}config list${N}\n\n"
+                    printf "  ${D}keys:${N}\n"
+                    for key in "${!SVMAN_DEFAULTS[@]}"; do
+                        printf "  ${D}  %-22s default: %s${N}\n" "$key" "${SVMAN_DEFAULTS[$key]}"
+                    done
+                    echo "" ;;
+        esac
+        ;;
+    -h|--help|help|"") _help ;;
+    -v|--version|version)
+        echo "svman 0.1.0-alpha"
+        ;;
+    *) _err "unknown command '$1'."; _info "run 'svman help' for info." ;;
+esac
