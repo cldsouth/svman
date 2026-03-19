@@ -91,11 +91,11 @@ svman pull "vault manager"            # keyword search
 ```
 
 Search results are paginated. Navigate with:
-- **number** — select a result
-- **n** — next page
-- **b** — back
-- **p<n>** — jump to page n
-- **q** — quit
+- `<number>` — select a result
+- `n` — next page
+- `b` — back
+- `p<n>` — jump to page n
+- `q` — quit
 ```bash
 svman pull cldsouth/svman -f utils    # install into a folder
 svman pull -p 8                       # show 8 results per page
