@@ -460,7 +460,7 @@ _list() {
 
     local root_scripts folders
     root_scripts=$(find "$VAULT_DIR" -maxdepth 1 -type f -not -name ".*" 2>/dev/null)
-    folders=$(find "$VAULT_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    folders=$(find "$VAULT_DIR" -mindepth 1 -maxdepth 1 -type d -not -name ".*" 2>/dev/null)
 
     # filtered: show only matching folders
     if [[ -n "$filter" ]]; then
