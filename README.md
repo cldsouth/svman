@@ -44,6 +44,10 @@ svman edit myscript -e kate      # open with a specific editor
 svman run myscript
 svman run myscript arg1 arg2     # pass arguments
 ```
+or
+```
+myscript arg1 arg2
+```
 
 ### List
 ```bash
